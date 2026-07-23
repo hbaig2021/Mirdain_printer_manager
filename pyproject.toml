@@ -1,0 +1,15 @@
+[project]
+name = "local-print-farm"
+version = "0.1.0"
+description = "Local-first 3D printer fleet monitoring and queue management."
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1.0",
+  "uvicorn[standard]>=0.34,<1.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
