@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 
 from backend.app import database
+from backend.app.adapters import AdapterSnapshot
 from backend.app.models import JobCreate, PrinterCreate
 
 
@@ -48,3 +50,36 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual([item.id for item in dashboard.jobs], [job.id])
         self.assertEqual(dashboard.jobs[0].queue_position, 1)
         self.assertEqual(len(dashboard.activity), 2)
+
+    def test_connection_snapshot_is_saved_without_storing_a_secret(self) -> None:
+        printer = database.create_printer(
+            PrinterCreate(
+                name="Forge West",
+                manufacturer="Prusa",
+                model="MK4",
+                adapter_type="prusalink",
+                host="printer.local",
+            )
+        )
+        snapshot = AdapterSnapshot(
+            state="printing",
+            percent_complete=24,
+            active_job="enclosure.3mf",
+            bed_temp=60,
+            nozzle_temp=215,
+            note="PRINTING",
+            seen_at=datetime.now(UTC),
+        )
+        saved = database.configure_connection(
+            printer.id,
+            adapter_type="prusalink",
+            host="printer.local",
+            credential_id="printer:test",
+            capabilities=["telemetry", "file_transfer", "job_control"],
+            snapshot=snapshot,
+        )
+        self.assertIsNotNone(saved)
+        self.assertEqual(saved.connection_state, "connected")
+        self.assertEqual(saved.active_job, "enclosure.3mf")
+        self.assertEqual(saved.capabilities, ["telemetry", "file_transfer", "job_control"])
+        self.assertEqual(database.credential_id_for_printer(printer.id), "printer:test")

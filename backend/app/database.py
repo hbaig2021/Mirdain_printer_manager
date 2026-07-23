@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -7,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterator
 
+from .adapters import AdapterSnapshot
 from .models import (
     ActivityRecord,
     DashboardResponse,
@@ -117,6 +119,11 @@ def initialize() -> None:
             ("run_hours", "INTEGER NOT NULL DEFAULT 0"),
             ("maintenance_due_hours", "INTEGER NOT NULL DEFAULT 250"),
             ("favorite", "INTEGER NOT NULL DEFAULT 0"),
+            ("credential_id", "TEXT"),
+            ("connection_state", "TEXT NOT NULL DEFAULT 'unconfigured'"),
+            ("connection_message", "TEXT"),
+            ("last_refreshed_at", "TEXT"),
+            ("capabilities", "TEXT NOT NULL DEFAULT '[]'"),
         ):
             _add_column_if_missing(database, "printers", name, declaration)
         database.execute("CREATE INDEX IF NOT EXISTS jobs_position_idx ON jobs(state, queue_position)")
@@ -140,6 +147,11 @@ def _record(row: sqlite3.Row | None, model: type[Any]) -> Any:
     values = dict(row)
     if "favorite" in values:
         values["favorite"] = bool(values["favorite"])
+    if "capabilities" in values:
+        try:
+            values["capabilities"] = json.loads(values["capabilities"] or "[]")
+        except (TypeError, ValueError):
+            values["capabilities"] = []
     return model(**values)
 
 
@@ -196,6 +208,72 @@ def delete_printer(printer_id: str) -> str | None:
         database.execute("DELETE FROM printers WHERE id = ?", (printer_id,))
         _activity(database, "info", f"{printer['name']} was removed from the fleet.")
         return str(printer["name"])
+
+
+def credential_id_for_printer(printer_id: str) -> str | None:
+    with connection() as database:
+        row = database.execute("SELECT credential_id FROM printers WHERE id = ?", (printer_id,)).fetchone()
+        return str(row["credential_id"]) if row and row["credential_id"] else None
+
+
+def configure_connection(
+    printer_id: str,
+    *,
+    adapter_type: str,
+    host: str,
+    credential_id: str | None,
+    capabilities: list[str],
+    snapshot: AdapterSnapshot,
+) -> PrinterRecord | None:
+    with connection() as database:
+        current = database.execute("SELECT name FROM printers WHERE id = ?", (printer_id,)).fetchone()
+        if not current:
+            return None
+        database.execute(
+            """UPDATE printers SET
+              adapter_type = ?, host = ?, credential_id = ?, connection_state = 'connected',
+              connection_message = ?, last_refreshed_at = ?, capabilities = ?, state = ?,
+              percent_complete = ?, active_job = ?, bed_temp = ?, nozzle_temp = ?, last_seen_at = ?, note = ?
+              WHERE id = ?""",
+            (
+                adapter_type, host, credential_id, snapshot.note, snapshot.seen_at.isoformat(),
+                json.dumps(capabilities), snapshot.state, snapshot.percent_complete, snapshot.active_job,
+                snapshot.bed_temp, snapshot.nozzle_temp, snapshot.seen_at.isoformat(), snapshot.note, printer_id,
+            ),
+        )
+        _activity(database, "success", f"{current['name']} connected through {adapter_type}.")
+        return _record(database.execute("SELECT * FROM printers WHERE id = ?", (printer_id,)).fetchone(), PrinterRecord)
+
+
+def apply_snapshot(printer_id: str, snapshot: AdapterSnapshot) -> PrinterRecord | None:
+    with connection() as database:
+        current = database.execute("SELECT name FROM printers WHERE id = ?", (printer_id,)).fetchone()
+        if not current:
+            return None
+        database.execute(
+            """UPDATE printers SET connection_state = 'connected', connection_message = ?,
+              last_refreshed_at = ?, state = ?, percent_complete = ?, active_job = ?,
+              bed_temp = ?, nozzle_temp = ?, last_seen_at = ?, note = ? WHERE id = ?""",
+            (
+                snapshot.note, snapshot.seen_at.isoformat(), snapshot.state, snapshot.percent_complete,
+                snapshot.active_job, snapshot.bed_temp, snapshot.nozzle_temp, snapshot.seen_at.isoformat(),
+                snapshot.note, printer_id,
+            ),
+        )
+        return _record(database.execute("SELECT * FROM printers WHERE id = ?", (printer_id,)).fetchone(), PrinterRecord)
+
+
+def mark_connection_error(printer_id: str, message: str) -> PrinterRecord | None:
+    with connection() as database:
+        current = database.execute("SELECT name FROM printers WHERE id = ?", (printer_id,)).fetchone()
+        if not current:
+            return None
+        database.execute(
+            "UPDATE printers SET connection_state = 'error', connection_message = ? WHERE id = ?",
+            (message, printer_id),
+        )
+        _activity(database, "warning", f"{current['name']} connection needs attention.")
+        return _record(database.execute("SELECT * FROM printers WHERE id = ?", (printer_id,)).fetchone(), PrinterRecord)
 
 
 def _normalize_queue(database: sqlite3.Connection) -> None:

@@ -14,11 +14,14 @@ Everything is saved to a SQLite database on this computer under
   start/complete state changes;
 - a reusable file catalog that can seed queue jobs;
 - spool inventory, printer assignments, and low-stock visibility; and
-- a local activity log.
+- a local activity log; and
+- read-only local telemetry connections for OctoPrint, Moonraker/Klipper, and
+  PrusaLink, with credentials stored in the operating system credential vault.
 
 The app does **not** yet control printers, transmit G-code, or expose cameras.
-Those features require model-specific, owner-approved LAN adapters and are kept
-off by default so a mistaken setup cannot start or interrupt a print.
+Those actions are the next adapter phase and stay off by default so a mistaken
+setup cannot start or interrupt a print. Bambu LAN support is being added as a
+separate adapter because it uses a different local protocol.
 
 ## First-time setup (Windows)
 

@@ -54,6 +54,10 @@ class PrinterRecord(PrinterCreate):
     bed_temp: int | None = None
     nozzle_temp: int | None = None
     favorite: bool = False
+    connection_state: Literal["unconfigured", "connected", "error", "manual"] = "unconfigured"
+    connection_message: str | None = None
+    last_refreshed_at: datetime | None = None
+    capabilities: list[str] = Field(default_factory=list)
 
 
 class JobCreate(BaseModel):
@@ -119,6 +123,18 @@ class FileCreate(BaseModel):
 class FileRecord(FileCreate):
     id: str
     created_at: datetime
+
+
+class PrinterConnectionRequest(BaseModel):
+    adapter_type: AdapterType
+    host: str = Field(min_length=1, max_length=255)
+    api_key: str | None = Field(default=None, max_length=2_000)
+
+
+class PrinterConnectionResponse(BaseModel):
+    printer: PrinterRecord
+    capabilities: list[str]
+    message: str
 
 
 class ActivityRecord(BaseModel):

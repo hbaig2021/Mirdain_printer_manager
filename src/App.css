@@ -235,6 +235,9 @@ h2 { margin-bottom: 0; color: var(--text); font-size: 19px; font-weight: 600; le
 .connection-card { min-height: 190px; padding: 22px; border: 1px solid rgba(138, 174, 201, .12); border-radius: 8px; background: linear-gradient(145deg, #0b1113, #17252a); }
 .connection-card strong { display: block; margin-bottom: 8px; color: var(--amber-soft); font-size: 15px; font-weight: 600; }
 .connection-card > p { max-width: 490px; margin-bottom: 24px; color: var(--text-dim); font-size: 12px; line-height: 1.55; }
+.connection-actions { display: flex; gap: 8px; margin-top: 18px; }
+.camera-status.connected { color: var(--green); }
+.form-help { margin: 0; color: var(--text-mute); font-size: 11px; line-height: 1.45; }
 .printer-edit { margin-top: 16px; padding: 16px; border: 1px solid var(--border); border-radius: 8px; }
 .printer-edit h2 { font-size: 15px; }
 .quick-status { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0; }
