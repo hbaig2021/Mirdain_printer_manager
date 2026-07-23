@@ -1,1 +1,0 @@
-"""Local Print Farm service."""
