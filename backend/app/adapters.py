@@ -27,6 +27,7 @@ class AdapterSnapshot:
     nozzle_temp: int | None
     note: str | None
     seen_at: datetime
+    job_outcome: str | None = None
 
 
 class AdapterError(RuntimeError):
@@ -171,6 +172,11 @@ class MoonrakerAdapter(PrinterAdapter):
             state = "attention"
         else:
             state = "ready"
+        job_outcome = {
+            "complete": "completed",
+            "cancelled": "cancelled",
+            "error": "failed",
+        }.get(raw_state)
         extruder = status.get("extruder", {}) if isinstance(status.get("extruder"), dict) else {}
         bed = status.get("heater_bed", {}) if isinstance(status.get("heater_bed"), dict) else {}
         progress = status.get("virtual_sdcard", {}).get("progress") if isinstance(status.get("virtual_sdcard"), dict) else None
@@ -183,6 +189,7 @@ class MoonrakerAdapter(PrinterAdapter):
             nozzle_temp=_temperature(extruder.get("temperature")),
             note=message or None,
             seen_at=datetime.now(UTC),
+            job_outcome=job_outcome,
         )
 
     def upload(self, host: str, credential: dict[str, str], source: Path, remote_name: str) -> str:
@@ -224,6 +231,11 @@ class PrusaLinkAdapter(PrinterAdapter):
             state = "ready"
         else:
             state = "attention"
+        job_outcome = {
+            "FINISHED": "completed",
+            "STOPPED": "cancelled",
+            "ERROR": "failed",
+        }.get(raw_state)
         progress = job.get("progress") or job.get("time_printing")
         temperatures = printer.get("temp_bed"), printer.get("temp_nozzle")
         active = job.get("file", {}).get("name") if isinstance(job.get("file"), dict) else job.get("filename")
@@ -235,6 +247,7 @@ class PrusaLinkAdapter(PrinterAdapter):
             nozzle_temp=_temperature(temperatures[1]),
             note=str(printer.get("state")) if printer.get("state") else None,
             seen_at=datetime.now(UTC),
+            job_outcome=job_outcome,
         )
 
 
@@ -250,7 +263,7 @@ class ManualAdapter(PrinterAdapter):
 
 class BambuLanAdapter(PrinterAdapter):
     key = "bambu_lan"
-    label = "Bambu LAN (coming next)"
+    label = "Bambu LAN (adapter not enabled)"
     capabilities = AdapterCapabilities(telemetry=False, file_transfer=False, job_control=False, camera=False)
 
     def snapshot(self, host: str, credential: dict[str, str]) -> AdapterSnapshot:

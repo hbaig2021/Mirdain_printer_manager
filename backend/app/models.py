@@ -7,8 +7,9 @@ from pydantic import BaseModel, Field
 
 
 AdapterType = Literal["bambu_lan", "prusalink", "octoprint", "moonraker", "manual"]
-PrinterState = Literal["setup", "ready", "printing", "attention", "offline"]
-JobState = Literal["draft", "queued", "assigned", "running", "completed", "failed", "cancelled"]
+PrinterState = Literal["setup", "ready", "starting", "printing", "attention", "offline"]
+JobState = Literal["draft", "queued", "assigned", "starting", "running", "paused", "completed", "failed", "cancelled"]
+LoopMode = Literal["sticky", "cycle"]
 
 
 class PrinterCreate(BaseModel):
@@ -17,9 +18,11 @@ class PrinterCreate(BaseModel):
     model: str = Field(min_length=1, max_length=80)
     adapter_type: AdapterType = "manual"
     host: str = Field(default="", max_length=255)
+    camera_url: str = Field(default="", max_length=2_000)
     location: str = Field(default="", max_length=80)
     material: str = Field(default="", max_length=80)
     supported_materials: list[str] = Field(default_factory=list, max_length=24)
+    auto_start_enabled: bool = False
     material_color: str = Field(default="#8aaec9", max_length=16)
     run_hours: int = Field(default=0, ge=0, le=1_000_000)
     maintenance_due_hours: int = Field(default=250, ge=1, le=1_000_000)
@@ -32,12 +35,14 @@ class PrinterUpdate(BaseModel):
     model: str | None = Field(default=None, min_length=1, max_length=80)
     adapter_type: AdapterType | None = None
     host: str | None = Field(default=None, max_length=255)
+    camera_url: str | None = Field(default=None, max_length=2_000)
     location: str | None = Field(default=None, max_length=80)
     state: PrinterState | None = None
     percent_complete: int | None = Field(default=None, ge=0, le=100)
     active_job: str | None = Field(default=None, max_length=120)
     material: str | None = Field(default=None, max_length=80)
     supported_materials: list[str] | None = Field(default=None, max_length=24)
+    auto_start_enabled: bool | None = None
     material_color: str | None = Field(default=None, max_length=16)
     bed_temp: int | None = Field(default=None, ge=0, le=500)
     nozzle_temp: int | None = Field(default=None, ge=0, le=500)
@@ -52,6 +57,7 @@ class PrinterRecord(PrinterCreate):
     state: PrinterState
     percent_complete: int | None = None
     active_job: str | None = None
+    active_job_id: str | None = None
     last_seen_at: datetime | None = None
     bed_temp: int | None = None
     nozzle_temp: int | None = None
@@ -69,6 +75,9 @@ class JobCreate(BaseModel):
     material: str = Field(default="", max_length=80)
     estimated_minutes: int = Field(default=60, ge=1, le=100_000)
     file_id: str | None = None
+    repetitions: int | None = Field(default=1, ge=1, le=100_000)
+    loop_mode: LoopMode = "sticky"
+    auto_restart: bool = False
 
 
 class JobUpdate(BaseModel):
@@ -80,6 +89,9 @@ class JobUpdate(BaseModel):
     state: JobState | None = None
     queue_position: int | None = Field(default=None, ge=1, le=100_000)
     file_id: str | None = None
+    repetitions: int | None = Field(default=None, ge=1, le=100_000)
+    loop_mode: LoopMode | None = None
+    auto_restart: bool | None = None
 
 
 class JobRecord(JobCreate):
@@ -90,6 +102,7 @@ class JobRecord(JobCreate):
     delivery_state: Literal["not_ready", "ready", "uploaded", "error"] = "not_ready"
     remote_file_path: str | None = None
     delivered_at: datetime | None = None
+    completed_repetitions: int = Field(default=0, ge=0)
 
 
 class MaterialCreate(BaseModel):
@@ -125,6 +138,8 @@ class FileCreate(BaseModel):
     material: str = Field(default="", max_length=80)
     estimated_minutes: int | None = Field(default=None, ge=1, le=100_000)
     notes: str = Field(default="", max_length=2_000)
+    auto_eject_verified: bool = False
+    estimated_filament_grams: float | None = Field(default=None, ge=0, le=100_000)
 
 
 class FileRecord(FileCreate):
@@ -140,11 +155,19 @@ class JobControlRequest(BaseModel):
     confirmation: Literal["START", "PAUSE", "RESUME", "CANCEL"]
 
 
+class JobCompletionRequest(BaseModel):
+    confirmation: Literal["COMPLETE"]
+
+
 class RouteCandidate(BaseModel):
     printer_id: str
     printer_name: str
     score: int
     reason: str
+
+
+class RouteJobRequest(BaseModel):
+    printer_id: str | None = None
 
 
 class RouteResult(BaseModel):

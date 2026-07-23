@@ -5,11 +5,12 @@ import tempfile
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from backend.app import database
-from backend.app.adapters import AdapterSnapshot
-from backend.app.main import route_candidates
-from backend.app.models import FileCreate, JobCreate, PrinterCreate
+from backend.app.adapters import AdapterCapabilities, AdapterSnapshot
+from backend.app.main import dispatch_verified_auto_start, refresh_and_dispatch, route_candidates
+from backend.app.models import FileCreate, JobCreate, JobUpdate, MaterialCreate, PrinterCreate
 
 
 class DatabaseTests(unittest.TestCase):
@@ -105,6 +106,15 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), contents)
         self.assertEqual(len(record.sha256 or ""), 64)
 
+    def test_upload_reads_a_slicer_filament_estimate(self) -> None:
+        stored = database.store_upload(
+            FileCreate(name="Measured cube", filename="cube.gcode", file_type="gcode"),
+            "cube.gcode",
+            io.BytesIO(b"; filament used [g] = 12.5\nG28\n"),
+        )
+
+        self.assertEqual(stored.estimated_filament_grams, 12.5)
+
     def test_route_candidates_prefers_the_ready_printer_with_loaded_material(self) -> None:
         matching = database.create_printer(
             PrinterCreate(
@@ -144,3 +154,177 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(candidates[0].score, 100)
         self.assertEqual(routed.target_printer_id, matching.id)
         self.assertEqual(routed.delivery_state, "not_ready")
+
+    def test_completed_loop_requeues_until_its_run_target_is_met(self) -> None:
+        job = database.create_job(
+            JobCreate(
+                name="Batch clip", filename="clip.gcode", repetitions=2, loop_mode="cycle",
+            )
+        )
+        database.update_job(job.id, JobUpdate(state="running"))
+
+        first = database.complete_job(job.id)
+        database.update_job(job.id, JobUpdate(state="running"))
+        second = database.complete_job(job.id)
+
+        self.assertEqual(first.state, "queued")
+        self.assertEqual(first.completed_repetitions, 1)
+        self.assertEqual(second.state, "completed")
+        self.assertEqual(second.completed_repetitions, 2)
+
+    def test_verified_auto_start_requires_enabled_printer_and_verified_file(self) -> None:
+        printer = database.create_printer(
+            PrinterCreate(
+                name="Auto-ready", manufacturer="Example", model="One", adapter_type="moonraker",
+                material="PETG - Black", supported_materials=["PETG"], auto_start_enabled=True,
+            )
+        )
+        snapshot = AdapterSnapshot(
+            state="ready", percent_complete=None, active_job=None, bed_temp=None,
+            nozzle_temp=None, note=None, seen_at=datetime.now(UTC),
+        )
+        database.configure_connection(
+            printer.id, adapter_type="moonraker", host="auto.local", credential_id=None,
+            capabilities=["telemetry", "file_transfer", "job_control"], snapshot=snapshot,
+        )
+        file = database.store_upload(
+            FileCreate(name="Ejecting part", filename="part.gcode", file_type="gcode", material="PETG", auto_eject_verified=True),
+            "part.gcode", io.BytesIO(b"G28\n"),
+        )
+        job = database.create_job(
+            JobCreate(name="Ejecting part", filename="part.gcode", file_id=file.id, material="PETG", auto_restart=True)
+        )
+
+        class FakeAdapter:
+            capabilities = AdapterCapabilities(telemetry=True, file_transfer=True, job_control=True, camera=False)
+
+            def __init__(self) -> None:
+                self.commands: list[str] = []
+
+            def upload(self, *args: object) -> str:
+                return "part.gcode"
+
+            def command(self, *args: object) -> None:
+                self.commands.append(str(args[2]))
+
+        adapter = FakeAdapter()
+        with patch("backend.app.main.get_adapter", return_value=adapter), patch("backend.app.main.load_secret", return_value={}):
+            started = dispatch_verified_auto_start(printer.id)
+
+        self.assertIsNotNone(started)
+        self.assertEqual(started.id, job.id)
+        self.assertEqual(started.state, "running")
+        self.assertEqual(adapter.commands, ["start"])
+
+    def test_auto_start_claim_blocks_a_second_dispatch(self) -> None:
+        printer = database.create_printer(
+            PrinterCreate(
+                name="Claimed printer", manufacturer="Example", model="One", adapter_type="moonraker",
+                material="PETG", supported_materials=["PETG"], auto_start_enabled=True,
+            )
+        )
+        snapshot = AdapterSnapshot(
+            state="ready", percent_complete=None, active_job=None, bed_temp=None,
+            nozzle_temp=None, note=None, seen_at=datetime.now(UTC),
+        )
+        database.configure_connection(
+            printer.id, adapter_type="moonraker", host="claim.local", credential_id=None,
+            capabilities=["telemetry", "file_transfer", "job_control"], snapshot=snapshot,
+        )
+        file = database.store_upload(
+            FileCreate(name="Ejecting part", filename="part.gcode", file_type="gcode", material="PETG", auto_eject_verified=True),
+            "part.gcode", io.BytesIO(b"G28\n"),
+        )
+        database.create_job(
+            JobCreate(name="First", filename="first.gcode", file_id=file.id, material="PETG", auto_restart=True)
+        )
+        database.create_job(
+            JobCreate(name="Second", filename="second.gcode", file_id=file.id, material="PETG", auto_restart=True)
+        )
+
+        class FakeAdapter:
+            capabilities = AdapterCapabilities(telemetry=True, file_transfer=True, job_control=True, camera=False)
+
+            def __init__(self) -> None:
+                self.commands: list[str] = []
+
+            def upload(self, *args: object) -> str:
+                return "part.gcode"
+
+            def command(self, *args: object) -> None:
+                self.commands.append(str(args[2]))
+
+        adapter = FakeAdapter()
+        with patch("backend.app.main.get_adapter", return_value=adapter), patch("backend.app.main.load_secret", return_value={}):
+            self.assertIsNotNone(dispatch_verified_auto_start(printer.id))
+            self.assertIsNone(dispatch_verified_auto_start(printer.id))
+
+        self.assertEqual(adapter.commands, ["start"])
+        self.assertEqual(database.get_printer(printer.id).active_job, "First")
+
+    def test_completion_cannot_release_a_printer_owned_by_another_job(self) -> None:
+        printer = database.create_printer(
+            PrinterCreate(name="Busy", manufacturer="Example", model="One", adapter_type="manual")
+        )
+        first = database.create_job(JobCreate(name="First", filename="first.gcode", target_printer_id=printer.id))
+        second = database.create_job(JobCreate(name="Second", filename="second.gcode", target_printer_id=printer.id))
+        database.update_job(first.id, JobUpdate(state="running"))
+        database.update_job(second.id, JobUpdate(state="running"))
+
+        result = database.complete_job(first.id)
+
+        self.assertEqual(result.state, "running")
+        self.assertEqual(database.get_printer(printer.id).active_job_id, second.id)
+
+    def test_completion_records_slicer_estimate_against_assigned_spool(self) -> None:
+        printer = database.create_printer(
+            PrinterCreate(name="Material printer", manufacturer="Example", model="One", adapter_type="manual")
+        )
+        spool = database.create_material(
+            MaterialCreate(
+                name="Loaded PETG", material_type="PETG", remaining_percent=80,
+                spool_grams=1_000, assigned_printer_id=printer.id,
+            )
+        )
+        file = database.create_file(
+            FileCreate(
+                name="PETG part", filename="part.gcode", file_type="gcode",
+                material="PETG - Black", estimated_filament_grams=100,
+            )
+        )
+        job = database.create_job(
+            JobCreate(
+                name="PETG part", filename="part.gcode", target_printer_id=printer.id,
+                material="PETG - Black", file_id=file.id,
+            )
+        )
+        database.update_job(job.id, JobUpdate(state="running"))
+
+        database.complete_job(job.id)
+
+        self.assertEqual(database.dashboard().materials[0].id, spool.id)
+        self.assertEqual(database.dashboard().materials[0].remaining_percent, 70)
+
+    def test_explicit_adapter_completion_reconciles_the_active_job(self) -> None:
+        printer = database.create_printer(
+            PrinterCreate(name="Telemetry printer", manufacturer="Example", model="One", adapter_type="moonraker")
+        )
+        job = database.create_job(
+            JobCreate(name="Finished part", filename="finished.gcode", target_printer_id=printer.id)
+        )
+        database.update_job(job.id, JobUpdate(state="running"))
+        completed_snapshot = AdapterSnapshot(
+            state="ready", percent_complete=100, active_job="finished.gcode", bed_temp=25,
+            nozzle_temp=30, note=None, seen_at=datetime.now(UTC), job_outcome="completed",
+        )
+
+        class FakeAdapter:
+            def snapshot(self, *args: object) -> AdapterSnapshot:
+                return completed_snapshot
+
+        with patch("backend.app.main.get_adapter", return_value=FakeAdapter()), patch("backend.app.main.load_secret", return_value={}):
+            refreshed = refresh_and_dispatch(printer.id)
+
+        self.assertEqual(refreshed.state, "ready")
+        self.assertEqual(database.get_job(job.id).state, "completed")
+        self.assertIsNone(database.get_printer(printer.id).active_job_id)

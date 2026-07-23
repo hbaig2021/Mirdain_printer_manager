@@ -53,6 +53,24 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(snapshot.active_job, "enclosure.3mf")
         self.assertEqual(snapshot.nozzle_temp, 215)
 
+    def test_moonraker_snapshot_reports_an_explicit_completed_job(self) -> None:
+        response = {
+            "result": {
+                "status": {
+                    "webhooks": {"state": "ready"},
+                    "print_stats": {"state": "complete", "filename": "finished.gcode", "message": ""},
+                    "virtual_sdcard": {"progress": 1},
+                    "extruder": {"temperature": 30},
+                    "heater_bed": {"temperature": 25},
+                }
+            }
+        }
+        with patch.object(MoonrakerAdapter, "_json", return_value=response):
+            snapshot = MoonrakerAdapter().snapshot("printer.local", {})
+
+        self.assertEqual(snapshot.state, "ready")
+        self.assertEqual(snapshot.job_outcome, "completed")
+
     def test_octoprint_upload_and_start_use_documented_local_endpoints(self) -> None:
         adapter = OctoPrintAdapter()
         with patch(

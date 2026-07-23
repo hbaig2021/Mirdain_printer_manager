@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import "./App.css";
 
-type PrinterState = "setup" | "ready" | "printing" | "attention" | "offline";
+type PrinterState = "setup" | "ready" | "starting" | "printing" | "attention" | "offline";
 type JobState =
   | "draft"
   | "queued"
   | "assigned"
+  | "starting"
   | "running"
+  | "paused"
   | "completed"
   | "failed"
   | "cancelled";
@@ -19,13 +21,16 @@ type Printer = {
   model: string;
   adapter_type: string;
   host: string;
+  camera_url: string;
   location: string;
   state: PrinterState;
   percent_complete: number | null;
   active_job: string | null;
+  active_job_id: string | null;
   last_seen_at: string | null;
   material: string;
   supported_materials: string[];
+  auto_start_enabled: boolean;
   material_color: string;
   bed_temp: number | null;
   nozzle_temp: number | null;
@@ -52,6 +57,10 @@ type Job = {
   delivery_state: "not_ready" | "ready" | "uploaded" | "error";
   remote_file_path: string | null;
   delivered_at: string | null;
+  repetitions: number | null;
+  loop_mode: "sticky" | "cycle";
+  auto_restart: boolean;
+  completed_repetitions: number;
 };
 type Material = {
   id: string;
@@ -77,12 +86,20 @@ type FileItem = {
   stored_filename: string | null;
   size_bytes: number | null;
   sha256: string | null;
+  auto_eject_verified: boolean;
+  estimated_filament_grams: number | null;
 };
 type Activity = {
   id: string;
   occurred_at: string;
   level: "info" | "success" | "warning";
   message: string;
+};
+type RouteCandidate = {
+  printer_id: string;
+  printer_name: string;
+  score: number;
+  reason: string;
 };
 type HubData = {
   printers: Printer[];
@@ -102,13 +119,16 @@ const preview: HubData = {
       model: "P1S",
       adapter_type: "bambu_lan",
       host: "192.168.1.88",
+      camera_url: "",
       location: "Shop floor",
       state: "printing",
       percent_complete: 62,
       active_job: "Pallet clips - batch 04",
+      active_job_id: "preview-job-1",
       last_seen_at: now,
       material: "PETG - Black",
       supported_materials: ["PLA", "PETG", "ABS", "ASA", "TPU"],
+      auto_start_enabled: false,
       material_color: "#20252a",
       bed_temp: 80,
       nozzle_temp: 255,
@@ -117,7 +137,7 @@ const preview: HubData = {
       favorite: true,
       note: "Clean build plate every week.",
       connection_state: "unconfigured",
-      connection_message: "Bambu LAN setup is coming next.",
+      connection_message: "Bambu LAN developer-mode support is not enabled in this release.",
       last_refreshed_at: null,
       capabilities: [],
     },
@@ -128,13 +148,16 @@ const preview: HubData = {
       model: "MK4",
       adapter_type: "prusalink",
       host: "192.168.1.91",
+      camera_url: "",
       location: "Shop floor",
       state: "ready",
       percent_complete: null,
       active_job: null,
+      active_job_id: null,
       last_seen_at: now,
       material: "PETG - Orange",
       supported_materials: ["PLA", "PETG", "TPU"],
+      auto_start_enabled: false,
       material_color: "#e8913a",
       bed_temp: null,
       nozzle_temp: null,
@@ -163,6 +186,10 @@ const preview: HubData = {
       delivery_state: "uploaded",
       remote_file_path: "pallet-clips-b04.3mf",
       delivered_at: now,
+      repetitions: null,
+      loop_mode: "cycle",
+      auto_restart: false,
+      completed_repetitions: 4,
     },
     {
       id: "preview-job-2",
@@ -178,6 +205,10 @@ const preview: HubData = {
       delivery_state: "not_ready",
       remote_file_path: null,
       delivered_at: null,
+      repetitions: 1,
+      loop_mode: "sticky",
+      auto_restart: false,
+      completed_repetitions: 0,
     },
     {
       id: "preview-job-3",
@@ -193,6 +224,10 @@ const preview: HubData = {
       delivery_state: "not_ready",
       remote_file_path: null,
       delivered_at: null,
+      repetitions: 1,
+      loop_mode: "sticky",
+      auto_restart: false,
+      completed_repetitions: 0,
     },
   ],
   materials: [
@@ -234,6 +269,8 @@ const preview: HubData = {
       stored_filename: "preview.3mf",
       size_bytes: 1640000,
       sha256: "preview",
+      auto_eject_verified: false,
+      estimated_filament_grams: 178,
     },
   ],
   activity: [
@@ -267,7 +304,9 @@ const labels: Record<PrinterState | JobState, string> = {
   draft: "Draft",
   queued: "Queued",
   assigned: "Assigned",
+  starting: "Starting",
   running: "Running",
+  paused: "Paused",
   completed: "Complete",
   failed: "Failed",
   cancelled: "Cancelled",
@@ -293,6 +332,11 @@ function fileSize(bytes: number | null) {
   if (bytes === null) return "Catalog record";
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+function runPlan(job: Job) {
+  const total = job.repetitions === null ? "∞" : String(job.repetitions);
+  const mode = job.loop_mode === "sticky" ? "priority loop" : "rotation loop";
+  return `${job.completed_repetitions}/${total} runs · ${mode}`;
 }
 function materialList(value: string) {
   return value
@@ -339,7 +383,7 @@ async function uploadFile(form: FormData) {
 
 function App() {
   const [data, setData] = useState<HubData>(preview);
-  const [serviceMode, setServiceMode] = useState<"preview" | "local">(
+  const [serviceMode, setServiceMode] = useState<"preview" | "local" | "offline">(
     "preview",
   );
   const [view, setView] = useState<View>("overview");
@@ -354,6 +398,10 @@ function App() {
   );
   const [notice, setNotice] = useState<string | null>(null);
   const [jobSeed, setJobSeed] = useState<Partial<Job> | null>(null);
+  const [routeReview, setRouteReview] = useState<{
+    job: Job;
+    candidates: RouteCandidate[];
+  } | null>(null);
 
   const load = async () => {
     try {
@@ -367,7 +415,7 @@ function App() {
       });
       setServiceMode("local");
     } catch {
-      setServiceMode("preview");
+      setServiceMode((current) => (current === "local" ? "offline" : current));
     }
   };
   useEffect(() => {
@@ -464,6 +512,20 @@ function App() {
     });
     setModal("job");
   };
+  const reviewRoute = async (job: Job) => {
+    try {
+      const candidates = (await api(
+        `/api/jobs/${job.id}/route-candidates`,
+      )) as RouteCandidate[];
+      if (!candidates.length) {
+        setNotice("No ready connected printer meets this job's current material requirements.");
+        return;
+      }
+      setRouteReview({ job, candidates });
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Routes could not be checked.");
+    }
+  };
 
   return (
     <div className="app-shell">
@@ -509,7 +571,11 @@ function App() {
         <div className="header-actions">
           <span className={`service-chip ${serviceMode}`}>
             <i />
-            {serviceMode === "local" ? "Local workspace" : "Preview mode"}
+            {serviceMode === "local"
+              ? "Local workspace"
+              : serviceMode === "offline"
+                ? "Last local sync"
+                : "Preview mode"}
           </span>
           <button className="button quiet" onClick={() => setModal("printer")}>
             Add printer
@@ -527,6 +593,12 @@ function App() {
             Start the local service to save your fleet, jobs, materials, and
             files on this computer.
           </span>
+        </div>
+      )}
+      {serviceMode === "offline" && (
+        <div className="workspace-banner offline-banner">
+          <strong>Local service is temporarily unavailable.</strong>
+          <span>Showing the last data received from this computer. Mirdain will reconnect automatically.</span>
         </div>
       )}
       {notice && (
@@ -562,10 +634,15 @@ function App() {
               `${job.name} was uploaded to its assigned printer.`,
             )
           }
-          onAutoRoute={(job) =>
+          onAutoRoute={reviewRoute}
+          onComplete={(job) =>
             mutate(
-              () => api(`/api/jobs/${job.id}/route`, { method: "POST" }),
-              `${job.name} was routed to the best ready compatible printer.`,
+              () =>
+                api(`/api/jobs/${job.id}/complete`, {
+                  method: "POST",
+                  body: JSON.stringify({ confirmation: "COMPLETE" }),
+                }),
+              `${job.name} was recorded as complete.`,
             )
           }
           onControl={(job, action) =>
@@ -654,6 +731,7 @@ function App() {
       {modal === "job" && (
         <JobModal
           printers={data.printers}
+          files={data.files}
           seed={jobSeed}
           onClose={() => {
             setModal(null);
@@ -719,6 +797,24 @@ function App() {
             }
           />
         )}
+      {routeReview && (
+        <RouteReviewModal
+          job={routeReview.job}
+          candidates={routeReview.candidates}
+          onClose={() => setRouteReview(null)}
+          onConfirm={(printerId) => {
+            setRouteReview(null);
+            void mutate(
+              () =>
+                api(`/api/jobs/${routeReview.job.id}/route`, {
+                  method: "POST",
+                  body: JSON.stringify({ printer_id: printerId }),
+                }),
+              `${routeReview.job.name} was routed to the selected compatible printer.`,
+            );
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -797,76 +893,54 @@ function Overview({
             Add a printer <span>-&gt;</span>
           </button>
         </div>
-        <div className="printer-table-wrap">
+        <div className="fleet-grid-wrap">
           {data.printers.length ? (
-            <table className="printer-table">
-              <thead>
-                <tr>
-                  <th>Printer</th>
-                  <th>Active job</th>
-                  <th>Status</th>
-                  <th>Material</th>
-                  <th>Service</th>
-                  <th aria-label="Open printer" />
-                </tr>
-              </thead>
-              <tbody>
-                {data.printers.map((printer) => (
-                  <tr key={printer.id} onClick={() => onPrinter(printer.id)}>
-                    <td>
-                      <div className="printer-cell">
-                        <i className={`state-dot ${printer.state}`} />
-                        <div>
-                          <strong>{printer.name}</strong>
-                          <span>
-                            {printer.manufacturer} / {printer.model}
-                          </span>
-                        </div>
-                      </div>
-                    </td>
-                    <td>
-                      <div className="job-cell">
-                        <strong>{printer.active_job || "No active job"}</strong>
-                        <span>
-                          {printer.location ||
-                            printer.host ||
-                            "No location set"}
-                        </span>
-                      </div>
-                    </td>
-                    <td>
-                      <span className={statusClass(printer.state)}>
-                        {labels[printer.state]}
+            <div className="fleet-card-grid">
+              {data.printers.map((printer) => (
+                <button
+                  className="fleet-card"
+                  key={printer.id}
+                  onClick={() => onPrinter(printer.id)}
+                >
+                  <span className="fleet-card-top">
+                    <span className="printer-cell">
+                      <i className={`state-dot ${printer.state}`} />
+                      <span>
+                        <strong>{printer.name}</strong>
+                        <small>{printer.manufacturer} / {printer.model}</small>
                       </span>
-                    </td>
-                    <td>
-                      {printer.material || (
-                        <span className="telemetry">Not loaded</span>
-                      )}
-                    </td>
-                    <td>
-                      {Math.max(
-                        0,
-                        printer.maintenance_due_hours - printer.run_hours,
-                      )}
-                      h left
-                    </td>
-                    <td>
-                      <button
-                        className="row-open"
-                        aria-label={`Open ${printer.name}`}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onPrinter(printer.id);
-                        }}
-                      >
-                        -&gt;
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                    </span>
+                    <span className={statusClass(printer.state)}>
+                      {labels[printer.state]}
+                    </span>
+                  </span>
+                  <span className="fleet-card-job">
+                    <small>{printer.state === "printing" ? "ACTIVE JOB" : "NEXT ACTION"}</small>
+                    <strong>{printer.active_job || (printer.state === "ready" ? "Ready for a compatible job" : "Review connection or setup")}</strong>
+                    {printer.percent_complete !== null && (
+                      <span className="fleet-progress">
+                        <i style={{ width: `${printer.percent_complete}%` }} />
+                        <em>{printer.percent_complete}%</em>
+                      </span>
+                    )}
+                  </span>
+                  <span className="fleet-card-meta">
+                    <span>
+                      <small>MATERIAL</small>
+                      <b>{printer.material || "Not loaded"}</b>
+                    </span>
+                    <span>
+                      <small>LOCAL SYNC</small>
+                      <b>{relativeTime(printer.last_refreshed_at)}</b>
+                    </span>
+                  </span>
+                  <span className="fleet-card-footer">
+                    {printer.capabilities.length ? `${printer.capabilities.length} live capabilities` : "Configure local connection"}
+                    <i>Open</i>
+                  </span>
+                </button>
+              ))}
+            </div>
           ) : (
             <EmptyState
               title="Bring your first printer online."
@@ -1000,6 +1074,7 @@ function QueueView({
   onMove,
   onDeliver,
   onAutoRoute,
+  onComplete,
   onControl,
   onRemove,
 }: {
@@ -1009,6 +1084,7 @@ function QueueView({
   onMove: (job: Job, direction: -1 | 1) => void;
   onDeliver: (job: Job) => void;
   onAutoRoute: (job: Job) => void;
+  onComplete: (job: Job) => void;
   onControl: (
     job: Job,
     action: "start" | "pause" | "resume" | "cancel",
@@ -1031,6 +1107,14 @@ function QueueView({
       )
     )
       onControl(job, action);
+  };
+  const confirmComplete = (job: Job) => {
+    if (
+      window.confirm(
+        `Record ${job.name} as complete? If verified automatic restart is armed, this can immediately launch the next eligible queued job.`,
+      )
+    )
+      onComplete(job);
   };
   return (
     <main className="home-main view-main">
@@ -1090,6 +1174,8 @@ function QueueView({
                         : job.file_id
                           ? "Ready to upload"
                           : "No file attached"}
+                      {" · "}{runPlan(job)}
+                      {job.auto_restart ? " · auto-restart armed" : ""}
                     </span>
                   </td>
                   <td>
@@ -1179,15 +1265,20 @@ function QueueView({
                     Pause
                   </button>
                 )}
-                {job.state === "running" && (
+                {job.state === "paused" && (
                   <button
-                    className="button quiet"
+                    className="button primary"
                     onClick={() => confirmControl(job, "resume")}
                   >
                     Resume
                   </button>
                 )}
-                {job.state === "running" && (
+                {(job.state === "running" || job.state === "paused") && (
+                  <button className="button quiet" onClick={() => confirmComplete(job)}>
+                    Complete
+                  </button>
+                )}
+                {(job.state === "running" || job.state === "paused") && (
                   <button
                     className="button danger-button"
                     onClick={() => confirmControl(job, "cancel")}
@@ -1318,6 +1409,9 @@ function FilesView({
           files.map((file) => (
             <article className="file-card" key={file.id}>
               <span className="file-type">{file.file_type.toUpperCase()}</span>
+              {file.auto_eject_verified && (
+                <span className="file-ready">Auto-eject verified</span>
+              )}
               <h2>{file.name}</h2>
               <p>{file.filename}</p>
               <dl>
@@ -1332,6 +1426,10 @@ function FilesView({
                 <div>
                   <dt>Local copy</dt>
                   <dd>{fileSize(file.size_bytes)}</dd>
+                </div>
+                <div>
+                  <dt>Filament est.</dt>
+                  <dd>{file.estimated_filament_grams === null ? "Not found" : `${file.estimated_filament_grams}g`}</dd>
                 </div>
               </dl>
               {file.notes && <small>{file.notes}</small>}
@@ -1389,6 +1487,7 @@ function PrinterView({
     100,
     Math.round((printer.run_hours / printer.maintenance_due_hours) * 100),
   );
+  const cameraAvailable = Boolean(printer.camera_url);
   return (
     <main className="printer-page">
       <button className="back-link" onClick={onBack}>
@@ -1445,15 +1544,23 @@ function PrinterView({
         <section className="camera-panel">
           <div className="camera-heading">
             <div>
-              <p className="eyebrow">LIVE VIEW</p>
-              <h2>Connection & telemetry</h2>
+              <p className="eyebrow">LOCAL CONNECTION</p>
+              <h2>Telemetry & camera access</h2>
             </div>
-            <span className={`camera-status ${printer.connection_state}`}>
-              {printer.connection_state === "connected"
-                ? "CONNECTED"
-                : "LOCAL ONLY"}
+            <span className={`camera-status ${cameraAvailable ? "connected" : ""}`}>
+              {cameraAvailable ? "CAMERA LIVE" : "NO CAMERA SOURCE"}
             </span>
           </div>
+          {cameraAvailable ? (
+            <div className="camera-live">
+              <img src={printer.camera_url} alt={`Live camera from ${printer.name}`} />
+              <span>Direct local camera source</span>
+            </div>
+          ) : (
+            <p className="camera-empty">
+              Add a local MJPEG stream or snapshot URL below to show this printer's actual camera feed. Mirdain does not generate a fake live view.
+            </p>
+          )}
           <div className="connection-card">
             <strong>
               {printer.connection_state === "connected"
@@ -1476,6 +1583,14 @@ function PrinterView({
                 <dd>
                   {printer.bed_temp ?? "-"}° / {printer.nozzle_temp ?? "-"}°
                 </dd>
+              </div>
+              <div>
+                <dt>Capabilities</dt>
+                <dd>{printer.capabilities.length ? printer.capabilities.join(", ") : "Not connected"}</dd>
+              </div>
+              <div>
+                <dt>Last local sync</dt>
+                <dd>{relativeTime(printer.last_refreshed_at)}</dd>
               </div>
             </dl>
             <div className="connection-actions">
@@ -1527,14 +1642,28 @@ function PrinterView({
               ))}
             </div>
             <div className="edit-fields">
+              <label className="wide-field">
+                Camera stream or snapshot URL
+                <input
+                  type="url"
+                  defaultValue={printer.camera_url}
+                  placeholder="http://printer.local/webcam/?action=stream"
+                  onBlur={(event) =>
+                    onUpdate(
+                      { camera_url: event.target.value.trim() },
+                      `${printer.name} camera source was updated.`,
+                    )
+                  }
+                />
+              </label>
               <label>
                 Progress %
                 <input
                   type="number"
                   min="0"
                   max="100"
-                  value={printer.percent_complete ?? ""}
-                  onChange={(event) =>
+                  defaultValue={printer.percent_complete ?? ""}
+                  onBlur={(event) =>
                     onUpdate(
                       {
                         percent_complete: event.target.value
@@ -1551,8 +1680,8 @@ function PrinterView({
                 <input
                   type="number"
                   min="0"
-                  value={printer.run_hours}
-                  onChange={(event) =>
+                  defaultValue={printer.run_hours}
+                  onBlur={(event) =>
                     onUpdate(
                       { run_hours: Number(event.target.value) || 0 },
                       `${printer.name} service hours were updated.`,
@@ -1568,8 +1697,9 @@ function PrinterView({
             <p className="eyebrow">JOB CONTROLS</p>
             <h2>Queue a verified job</h2>
             <p>
-              Each job keeps an explicit printer target and must be started
-              manually until a hardware adapter is enabled.
+              {printer.auto_start_enabled
+                ? "Verified auto-start is armed. The local worker checks connected printers every 10 seconds, but only a queued job with a verified ejection file can be reserved."
+                : "Jobs stay manual by default. Enable auto-start only after you have tested a reliable ejection workflow."}
             </p>
             <div className="control-actions">
               <button className="button primary" onClick={onAddJob}>
@@ -1587,6 +1717,26 @@ function PrinterView({
                 {printer.favorite ? "Unfavorite" : "Favorite"}
               </button>
             </div>
+            <button
+              className="button quiet automation-toggle"
+              onClick={() => {
+                if (
+                  !printer.auto_start_enabled &&
+                  !window.confirm(
+                    `Enable verified auto-start for ${printer.name}? A matching queued job can start automatically after an eligible completion or refresh.`,
+                  )
+                )
+                  return;
+                onUpdate(
+                  { auto_start_enabled: !printer.auto_start_enabled },
+                  `${printer.name} verified auto-start ${printer.auto_start_enabled ? "was disabled" : "is armed"}.`,
+                );
+              }}
+            >
+              {printer.auto_start_enabled
+                ? "Disable verified auto-start"
+                : "Enable verified auto-start"}
+            </button>
           </section>
           <section className="side-panel">
             <div className="side-heading">
@@ -1686,6 +1836,55 @@ function EmptyState({
   );
 }
 
+function RouteReviewModal({
+  job,
+  candidates,
+  onClose,
+  onConfirm,
+}: {
+  job: Job;
+  candidates: RouteCandidate[];
+  onClose: () => void;
+  onConfirm: (printerId: string) => void;
+}) {
+  const [printerId, setPrinterId] = useState(candidates[0]?.printer_id ?? "");
+  return (
+    <Modal
+      eyebrow="ROUTING REVIEW"
+      title={`Choose where ${job.name} should run`}
+      copy="Mirdain checked only ready, connected printers with file delivery and the required material profile. Confirm a route before changing the current assignment."
+      onClose={onClose}
+    >
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          onConfirm(printerId);
+        }}
+      >
+        <div className="route-options" role="radiogroup" aria-label="Compatible printers">
+          {candidates.map((candidate) => (
+            <button
+              type="button"
+              key={candidate.printer_id}
+              className={candidate.printer_id === printerId ? "route-option selected" : "route-option"}
+              role="radio"
+              aria-checked={candidate.printer_id === printerId}
+              onClick={() => setPrinterId(candidate.printer_id)}
+            >
+              <span>
+                <strong>{candidate.printer_name}</strong>
+                <small>{candidate.reason}</small>
+              </span>
+              <b>{candidate.score}</b>
+            </button>
+          ))}
+        </div>
+        {actions(onClose, "Confirm route")}
+      </form>
+    </Modal>
+  );
+}
+
 function Modal({
   eyebrow,
   title,
@@ -1751,9 +1950,11 @@ function PrinterModal({
       model: String(form.get("model")),
       adapter_type: String(form.get("adapter_type")),
       host: String(form.get("host")),
+      camera_url: String(form.get("camera_url")).trim(),
       location: String(form.get("location")),
       material: String(form.get("material")),
       supported_materials: materialList(String(form.get("supported_materials"))),
+      auto_start_enabled: form.get("auto_start_enabled") === "on",
       maintenance_due_hours: Number(form.get("maintenance_due_hours")) || 250,
     });
   };
@@ -1784,7 +1985,7 @@ function PrinterModal({
             Connection
             <select name="adapter_type" defaultValue="manual">
               <option value="manual">Manual tracking</option>
-              <option value="bambu_lan">Bambu LAN</option>
+              <option value="bambu_lan">Bambu LAN (record only — adapter in development)</option>
               <option value="prusalink">PrusaLink</option>
               <option value="octoprint">OctoPrint</option>
               <option value="moonraker">Moonraker</option>
@@ -1795,6 +1996,10 @@ function PrinterModal({
             <input name="host" placeholder="192.168.1.88" />
           </label>
         </div>
+        <label>
+          Camera stream or snapshot URL (optional)
+          <input name="camera_url" type="url" placeholder="http://printer.local/webcam/?action=stream" />
+        </label>
         <div className="form-split">
           <label>
             Location
@@ -1820,6 +2025,13 @@ function PrinterModal({
             name="supported_materials"
             placeholder="e.g. PLA, PETG, ABS"
           />
+        </label>
+        <label className="check-row">
+          <input name="auto_start_enabled" type="checkbox" />
+          <span>
+            <strong>Allow verified automatic starts</strong>
+            <small>Only use with an established auto-ejection workflow. It remains off by default.</small>
+          </span>
         </label>
         {actions(onClose, "Save locally")}
       </form>
@@ -1865,7 +2077,7 @@ function ConnectionModal({
             <option value="octoprint">OctoPrint</option>
             <option value="moonraker">Moonraker / Klipper</option>
             <option value="prusalink">PrusaLink</option>
-            <option value="bambu_lan">Bambu LAN (coming next)</option>
+            <option value="bambu_lan" disabled>Bambu LAN (adapter in development)</option>
           </select>
         </label>
         <label>
@@ -1898,25 +2110,37 @@ function ConnectionModal({
 }
 function JobModal({
   printers,
+  files,
   seed,
   onClose,
   onSubmit,
 }: {
   printers: Printer[];
+  files: FileItem[];
   seed: Partial<Job> | null;
   onClose: () => void;
   onSubmit: (payload: Record<string, unknown>) => void;
 }) {
+  const [fileId, setFileId] = useState(seed?.file_id ?? "");
+  const [filename, setFilename] = useState(seed?.filename ?? "");
+  const [material, setMaterial] = useState(seed?.material ?? "");
+  const [autoRestart, setAutoRestart] = useState(seed?.auto_restart ?? false);
+  const selectedFile = files.find((file) => file.id === fileId) ?? null;
+  const canAutoRestart = Boolean(selectedFile?.auto_eject_verified);
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
+    const repetitions = String(form.get("repetitions"));
     onSubmit({
       name: String(form.get("name")),
-      filename: String(form.get("filename")),
+      filename,
       target_printer_id: String(form.get("target_printer_id")) || null,
-      material: String(form.get("material")),
+      material,
       estimated_minutes: Number(form.get("estimated_minutes")) || 60,
-      file_id: seed?.file_id ?? null,
+      file_id: fileId || null,
+      repetitions: repetitions === "infinite" ? null : Number(repetitions) || 1,
+      loop_mode: String(form.get("loop_mode")),
+      auto_restart: autoRestart && canAutoRestart,
     });
   };
   return (
@@ -1937,10 +2161,35 @@ function JobModal({
           />
         </label>
         <label>
+          Stored local file
+          <select
+            name="file_id"
+            value={fileId}
+            onChange={(event) => {
+              const nextFileId = event.target.value;
+              const nextFile = files.find((file) => file.id === nextFileId);
+              setFileId(nextFileId);
+              if (nextFile) {
+                setFilename(nextFile.filename);
+                if (!material) setMaterial(nextFile.material);
+              }
+              if (!nextFile?.auto_eject_verified) setAutoRestart(false);
+            }}
+          >
+            <option value="">No uploaded local file attached</option>
+            {files.map((file) => (
+              <option value={file.id} key={file.id}>
+                {file.name} ({file.filename})
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
           File name
           <input
             name="filename"
-            defaultValue={seed?.filename ?? ""}
+            value={filename}
+            onChange={(event) => setFilename(event.target.value)}
             placeholder="fixture-arm-left.gcode"
             required
           />
@@ -1974,13 +2223,57 @@ function JobModal({
           Material
           <input
             name="material"
-            defaultValue={seed?.material ?? ""}
+            value={material}
+            onChange={(event) => setMaterial(event.target.value)}
             placeholder="e.g. PETG - Orange"
           />
         </label>
-        {seed?.file_id ? (
+        <div className="form-split">
+          <label>
+            Production runs
+            <select
+              name="repetitions"
+              defaultValue={
+                seed?.repetitions === null
+                  ? "infinite"
+                  : String(seed?.repetitions ?? 1)
+              }
+            >
+              <option value="1">One run</option>
+              <option value="2">2 runs</option>
+              <option value="5">5 runs</option>
+              <option value="10">10 runs</option>
+              <option value="infinite">Loop continuously</option>
+            </select>
+          </label>
+          <label>
+            Queue behavior
+            <select name="loop_mode" defaultValue={seed?.loop_mode ?? "sticky"}>
+              <option value="sticky">Keep priority</option>
+              <option value="cycle">Return to queue end</option>
+            </select>
+          </label>
+        </div>
+        <label className="check-row">
+          <input
+            name="auto_restart"
+            type="checkbox"
+            checked={autoRestart}
+            disabled={!canAutoRestart}
+            onChange={(event) => setAutoRestart(event.target.checked)}
+          />
+          <span>
+            <strong>Auto-restart after a verified ejection</strong>
+            <small>
+              {canAutoRestart
+                ? "This selected file is marked auto-eject verified. The printer must also be armed before it can start automatically."
+                : "Select an uploaded file that you have marked auto-eject verified before this option can be enabled."}
+            </small>
+          </span>
+        </label>
+        {selectedFile ? (
           <p className="quiet-copy">
-            An uploaded local file is attached to this job.
+            An uploaded local file is attached to this job and will be sent only when you choose Upload or an eligible verified automation runs.
           </p>
         ) : (
           <p className="quiet-copy">
@@ -2142,6 +2435,13 @@ function FileModal({
             name="notes"
             placeholder="e.g. Verified with the P1S profile"
           />
+        </label>
+        <label className="check-row">
+          <input name="auto_eject_verified" type="checkbox" />
+          <span>
+            <strong>This file has verified auto-ejection G-code</strong>
+            <small>Required before a future auto-restart workflow can use this file.</small>
+          </span>
         </label>
         {actions(onClose, "Store file locally")}
       </form>
