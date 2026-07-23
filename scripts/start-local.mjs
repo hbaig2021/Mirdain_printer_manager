@@ -7,7 +7,7 @@ const root = process.cwd()
 const python = process.platform === 'win32'
   ? join(root, '.venv', 'Scripts', 'python.exe')
   : join(root, '.venv', 'bin', 'python')
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+const vite = join(root, 'node_modules', 'vite', 'bin', 'vite.js')
 let backend
 let frontend
 
@@ -59,7 +59,7 @@ if (!existsSync(python)) {
     stop()
     process.exitCode = 1
   } else {
-    frontend = spawn(npm, ['run', 'dev', '--', '--host', '127.0.0.1', '--port', String(webPort)], { stdio: 'inherit', env: { ...process.env, MIRDAIN_API_URL: apiUrl }, shell: process.platform === 'win32' })
+    frontend = spawn(process.execPath, [vite, '--host', '127.0.0.1', '--port', String(webPort)], { stdio: 'inherit', env: { ...process.env, MIRDAIN_API_URL: apiUrl } })
     setTimeout(() => { void import('node:child_process').then(({ exec }) => exec(process.platform === 'win32' ? `start "" ${webUrl}` : `xdg-open ${webUrl}`)) }, 900)
     console.log(`\nMirdain Print Hub is opening at ${webUrl}. Press Ctrl+C here to stop both local services.\n`)
   }
