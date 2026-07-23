@@ -122,6 +122,7 @@ def initialize() -> None:
         for name, declaration in (
             ("location", "TEXT NOT NULL DEFAULT ''"),
             ("material", "TEXT NOT NULL DEFAULT ''"),
+            ("supported_materials", "TEXT NOT NULL DEFAULT '[]'"),
             ("material_color", "TEXT NOT NULL DEFAULT '#8aaec9'"),
             ("bed_temp", "INTEGER"),
             ("nozzle_temp", "INTEGER"),
@@ -174,6 +175,11 @@ def _record(row: sqlite3.Row | None, model: type[Any]) -> Any:
             values["capabilities"] = json.loads(values["capabilities"] or "[]")
         except (TypeError, ValueError):
             values["capabilities"] = []
+    if "supported_materials" in values:
+        try:
+            values["supported_materials"] = json.loads(values["supported_materials"] or "[]")
+        except (TypeError, ValueError):
+            values["supported_materials"] = []
     return model(**values)
 
 
@@ -183,12 +189,12 @@ def create_printer(payload: PrinterCreate) -> PrinterRecord:
         database.execute(
             """INSERT INTO printers (
               id, name, manufacturer, model, adapter_type, host, location, state,
-              material, material_color, run_hours, maintenance_due_hours, note
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+              material, material_color, supported_materials, run_hours, maintenance_due_hours, note
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 record.id, record.name, record.manufacturer, record.model, record.adapter_type,
                 record.host, record.location, record.state, record.material, record.material_color,
-                record.run_hours, record.maintenance_due_hours, record.note,
+                json.dumps(record.supported_materials), record.run_hours, record.maintenance_due_hours, record.note,
             ),
         )
         _activity(database, "info", f"{record.name} was added and is awaiting local connection setup.")
@@ -212,6 +218,8 @@ def update_printer(printer_id: str, payload: PrinterUpdate) -> PrinterRecord | N
         next_values = {**current_values, **changes}
         if "favorite" in next_values:
             next_values["favorite"] = int(bool(next_values["favorite"]))
+        if "supported_materials" in changes:
+            next_values["supported_materials"] = json.dumps(next_values["supported_materials"])
         assignments = ", ".join(f"{field} = ?" for field in changes)
         values = [next_values[field] for field in changes]
         database.execute(f"UPDATE printers SET {assignments} WHERE id = ?", (*values, printer_id))
@@ -260,7 +268,7 @@ def configure_connection(
             (
                 adapter_type, host, credential_id, snapshot.note, snapshot.seen_at.isoformat(),
                 json.dumps(capabilities), snapshot.state, snapshot.percent_complete, snapshot.active_job,
-                snapshot.bed_temp, snapshot.nozzle_temp, snapshot.seen_at.isoformat(), snapshot.note, printer_id,
+                snapshot.bed_temp, snapshot.nozzle_temp, snapshot.seen_at.isoformat(), snapshot.note or "", printer_id,
             ),
         )
         _activity(database, "success", f"{current['name']} connected through {adapter_type}.")
@@ -279,7 +287,7 @@ def apply_snapshot(printer_id: str, snapshot: AdapterSnapshot) -> PrinterRecord 
             (
                 snapshot.note, snapshot.seen_at.isoformat(), snapshot.state, snapshot.percent_complete,
                 snapshot.active_job, snapshot.bed_temp, snapshot.nozzle_temp, snapshot.seen_at.isoformat(),
-                snapshot.note, printer_id,
+                snapshot.note or "", printer_id,
             ),
         )
         return _record(database.execute("SELECT * FROM printers WHERE id = ?", (printer_id,)).fetchone(), PrinterRecord)
@@ -338,7 +346,10 @@ def update_job(job_id: str, payload: JobUpdate) -> JobRecord | None:
             return None
         current_values = dict(current)
         next_values = {**current_values, **changes}
-        if "file_id" in changes and changes["file_id"] != current_values.get("file_id"):
+        if (
+            ("file_id" in changes and changes["file_id"] != current_values.get("file_id"))
+            or ("target_printer_id" in changes and changes["target_printer_id"] != current_values.get("target_printer_id"))
+        ):
             next_values["delivery_state"] = "ready" if changes["file_id"] else "not_ready"
             next_values["remote_file_path"] = None
             next_values["delivered_at"] = None
@@ -516,6 +527,22 @@ def log_job_control(job_id: str, action: str) -> None:
         job = database.execute("SELECT name FROM jobs WHERE id = ?", (job_id,)).fetchone()
         if job:
             _activity(database, "info", f"{job['name']} received a confirmed {action} command.")
+
+
+def route_job(job_id: str, printer_id: str, reason: str) -> JobRecord | None:
+    with connection() as database:
+        job = database.execute("SELECT name FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        printer = database.execute("SELECT name FROM printers WHERE id = ?", (printer_id,)).fetchone()
+        if not job or not printer:
+            return None
+        database.execute(
+            """UPDATE jobs SET target_printer_id = ?,
+              delivery_state = CASE WHEN file_id IS NULL THEN 'not_ready' ELSE 'ready' END,
+              remote_file_path = NULL, delivered_at = NULL WHERE id = ?""",
+            (printer_id, job_id),
+        )
+        _activity(database, "success", f"{job['name']} was routed to {printer['name']} ({reason}).")
+        return _record(database.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone(), JobRecord)
 
 
 def delete_file(file_id: str) -> str | None:

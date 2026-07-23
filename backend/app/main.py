@@ -25,6 +25,8 @@ from .models import (
     PrinterConnectionResponse,
     PrinterRecord,
     PrinterUpdate,
+    RouteCandidate,
+    RouteResult,
 )
 from .secret_store import SecretStoreError, load as load_secret, remove as remove_secret, save as save_secret
 
@@ -57,6 +59,37 @@ def connection_error(printer_id: str, error: Exception) -> HTTPException:
     message = str(error)
     database.mark_connection_error(printer_id, message)
     return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=message)
+
+
+def material_type(value: str) -> str:
+    normalized = value.strip().upper()
+    for separator in ("·", "-", "/", ","):
+        normalized = normalized.split(separator, 1)[0].strip()
+    return normalized
+
+
+def route_candidates(job: JobRecord) -> list[RouteCandidate]:
+    required = material_type(job.material)
+    candidates: list[RouteCandidate] = []
+    for printer in database.dashboard().printers:
+        if printer.state != "ready" or printer.connection_state != "connected":
+            continue
+        if "file_transfer" not in printer.capabilities:
+            continue
+        loaded = material_type(printer.material)
+        supported = {material_type(item) for item in printer.supported_materials if material_type(item)}
+        if required and required not in supported and required != loaded:
+            continue
+        if required and printer.material.strip().casefold() == job.material.strip().casefold():
+            score, reason = 100, "the matching material is already loaded"
+        elif required and required == loaded:
+            score, reason = 90, f"{required} is currently loaded"
+        elif required:
+            score, reason = 70, f"the printer profile supports {required}"
+        else:
+            score, reason = 30, "the printer is ready and accepts file delivery"
+        candidates.append(RouteCandidate(printer_id=printer.id, printer_name=printer.name, score=score, reason=reason))
+    return sorted(candidates, key=lambda item: (-item.score, item.printer_name.casefold()))
 
 
 @app.get("/api/health")
@@ -107,6 +140,33 @@ def patch_job(job_id: str, payload: JobUpdate) -> JobRecord:
 def remove_job(job_id: str) -> None:
     if not database.delete_job(job_id):
         raise missing("Job")
+
+
+@app.get("/api/jobs/{job_id}/route-candidates", response_model=list[RouteCandidate])
+def get_route_candidates(job_id: str) -> list[RouteCandidate]:
+    job = database.get_job(job_id)
+    if not job:
+        raise missing("Job")
+    return route_candidates(job)
+
+
+@app.post("/api/jobs/{job_id}/route", response_model=RouteResult)
+def route_job(job_id: str) -> RouteResult:
+    job = database.get_job(job_id)
+    if not job:
+        raise missing("Job")
+    candidates = route_candidates(job)
+    if not candidates:
+        material = material_type(job.material)
+        suffix = f" for {material}" if material else ""
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"No ready, connected printer with file delivery is compatible{suffix}. Update its material profile or connect another printer.",
+        )
+    updated = database.route_job(job_id, candidates[0].printer_id, candidates[0].reason)
+    if not updated:
+        raise missing("Job")
+    return RouteResult(job=updated, candidates=candidates)
 
 
 @app.post("/api/materials", response_model=MaterialRecord, status_code=status.HTTP_201_CREATED)

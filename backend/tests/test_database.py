@@ -8,6 +8,7 @@ from pathlib import Path
 
 from backend.app import database
 from backend.app.adapters import AdapterSnapshot
+from backend.app.main import route_candidates
 from backend.app.models import FileCreate, JobCreate, PrinterCreate
 
 
@@ -103,3 +104,43 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(record.size_bytes, len(contents))
         self.assertEqual(path.read_bytes(), contents)
         self.assertEqual(len(record.sha256 or ""), 64)
+
+    def test_route_candidates_prefers_the_ready_printer_with_loaded_material(self) -> None:
+        matching = database.create_printer(
+            PrinterCreate(
+                name="PETG ready",
+                manufacturer="Example",
+                model="One",
+                adapter_type="moonraker",
+                material="PETG - Black",
+                supported_materials=["PLA", "PETG"],
+            )
+        )
+        alternate = database.create_printer(
+            PrinterCreate(
+                name="PETG available",
+                manufacturer="Example",
+                model="Two",
+                adapter_type="moonraker",
+                material="PLA - White",
+                supported_materials=["PLA", "PETG"],
+            )
+        )
+        snapshot = AdapterSnapshot(
+            state="ready", percent_complete=None, active_job=None, bed_temp=None,
+            nozzle_temp=None, note=None, seen_at=datetime.now(UTC),
+        )
+        for printer in (matching, alternate):
+            database.configure_connection(
+                printer.id, adapter_type="moonraker", host=f"{printer.id}.local",
+                credential_id=None, capabilities=["telemetry", "file_transfer", "job_control"], snapshot=snapshot,
+            )
+        job = database.create_job(JobCreate(name="PETG part", filename="part.gcode", material="PETG - Black"))
+
+        candidates = route_candidates(job)
+        routed = database.route_job(job.id, candidates[0].printer_id, candidates[0].reason)
+
+        self.assertEqual(candidates[0].printer_id, matching.id)
+        self.assertEqual(candidates[0].score, 100)
+        self.assertEqual(routed.target_printer_id, matching.id)
+        self.assertEqual(routed.delivery_state, "not_ready")

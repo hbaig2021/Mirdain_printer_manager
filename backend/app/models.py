@@ -19,6 +19,7 @@ class PrinterCreate(BaseModel):
     host: str = Field(default="", max_length=255)
     location: str = Field(default="", max_length=80)
     material: str = Field(default="", max_length=80)
+    supported_materials: list[str] = Field(default_factory=list, max_length=24)
     material_color: str = Field(default="#8aaec9", max_length=16)
     run_hours: int = Field(default=0, ge=0, le=1_000_000)
     maintenance_due_hours: int = Field(default=250, ge=1, le=1_000_000)
@@ -36,6 +37,7 @@ class PrinterUpdate(BaseModel):
     percent_complete: int | None = Field(default=None, ge=0, le=100)
     active_job: str | None = Field(default=None, max_length=120)
     material: str | None = Field(default=None, max_length=80)
+    supported_materials: list[str] | None = Field(default=None, max_length=24)
     material_color: str | None = Field(default=None, max_length=16)
     bed_temp: int | None = Field(default=None, ge=0, le=500)
     nozzle_temp: int | None = Field(default=None, ge=0, le=500)
@@ -136,6 +138,18 @@ class FileRecord(FileCreate):
 class JobControlRequest(BaseModel):
     action: Literal["start", "pause", "resume", "cancel"]
     confirmation: Literal["START", "PAUSE", "RESUME", "CANCEL"]
+
+
+class RouteCandidate(BaseModel):
+    printer_id: str
+    printer_name: str
+    score: int
+    reason: str
+
+
+class RouteResult(BaseModel):
+    job: JobRecord
+    candidates: list[RouteCandidate]
 
 
 class PrinterConnectionRequest(BaseModel):

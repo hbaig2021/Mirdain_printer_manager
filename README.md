@@ -11,6 +11,8 @@ Everything is saved to a SQLite database on this computer under
 
 - fleet records, printer status, favorite machines, service hours, and notes;
 - a persistent production queue with explicit printer assignments;
+- compatibility profiles and an **Auto-route** action that selects the best
+  ready, connected printer with file delivery and the required material;
 - a local print-file library that stores actual `.gcode`, `.3mf`, `.bgcode`,
   `.g`, and `.gc` files (up to 512 MB) and can seed queue jobs;
 - spool inventory, printer assignments, and low-stock visibility; and

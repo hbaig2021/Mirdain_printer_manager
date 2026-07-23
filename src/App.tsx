@@ -25,6 +25,7 @@ type Printer = {
   active_job: string | null;
   last_seen_at: string | null;
   material: string;
+  supported_materials: string[];
   material_color: string;
   bed_temp: number | null;
   nozzle_temp: number | null;
@@ -107,6 +108,7 @@ const preview: HubData = {
       active_job: "Pallet clips - batch 04",
       last_seen_at: now,
       material: "PETG - Black",
+      supported_materials: ["PLA", "PETG", "ABS", "ASA", "TPU"],
       material_color: "#20252a",
       bed_temp: 80,
       nozzle_temp: 255,
@@ -132,6 +134,7 @@ const preview: HubData = {
       active_job: null,
       last_seen_at: now,
       material: "PETG - Orange",
+      supported_materials: ["PLA", "PETG", "TPU"],
       material_color: "#e8913a",
       bed_temp: null,
       nozzle_temp: null,
@@ -290,6 +293,13 @@ function fileSize(bytes: number | null) {
   if (bytes === null) return "Catalog record";
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+function materialList(value: string) {
+  return value
+    .split(",")
+    .map((item) => item.trim().toUpperCase())
+    .filter(Boolean)
+    .slice(0, 24);
 }
 function statusClass(state: PrinterState | JobState) {
   return `status-pill ${state}`;
@@ -550,6 +560,12 @@ function App() {
             mutate(
               () => api(`/api/jobs/${job.id}/deliver`, { method: "POST" }),
               `${job.name} was uploaded to its assigned printer.`,
+            )
+          }
+          onAutoRoute={(job) =>
+            mutate(
+              () => api(`/api/jobs/${job.id}/route`, { method: "POST" }),
+              `${job.name} was routed to the best ready compatible printer.`,
             )
           }
           onControl={(job, action) =>
@@ -983,6 +999,7 @@ function QueueView({
   onAdd,
   onMove,
   onDeliver,
+  onAutoRoute,
   onControl,
   onRemove,
 }: {
@@ -991,6 +1008,7 @@ function QueueView({
   onAdd: () => void;
   onMove: (job: Job, direction: -1 | 1) => void;
   onDeliver: (job: Job) => void;
+  onAutoRoute: (job: Job) => void;
   onControl: (
     job: Job,
     action: "start" | "pause" | "resume" | "cancel",
@@ -1093,6 +1111,14 @@ function QueueView({
                             Upload
                           </button>
                         )}
+                      {job.delivery_state !== "uploaded" && (
+                        <button
+                          className="button quiet"
+                          onClick={() => onAutoRoute(job)}
+                        >
+                          Auto-route
+                        </button>
+                      )}
                       {job.delivery_state === "uploaded" && (
                         <button
                           className="button primary"
@@ -1727,6 +1753,7 @@ function PrinterModal({
       host: String(form.get("host")),
       location: String(form.get("location")),
       material: String(form.get("material")),
+      supported_materials: materialList(String(form.get("supported_materials"))),
       maintenance_due_hours: Number(form.get("maintenance_due_hours")) || 250,
     });
   };
@@ -1786,6 +1813,13 @@ function PrinterModal({
         <label>
           Loaded material
           <input name="material" placeholder="e.g. PETG - Black" />
+        </label>
+        <label>
+          Compatible materials
+          <input
+            name="supported_materials"
+            placeholder="e.g. PLA, PETG, ABS"
+          />
         </label>
         {actions(onClose, "Save locally")}
       </form>
