@@ -10,18 +10,24 @@ Everything is saved to a SQLite database on this computer under
 ## Included now
 
 - fleet records, printer status, favorite machines, service hours, and notes;
-- a persistent production queue with explicit printer assignments and local
-  start/complete state changes;
-- a reusable file catalog that can seed queue jobs;
+- a persistent production queue with explicit printer assignments;
+- a local print-file library that stores actual `.gcode`, `.3mf`, `.bgcode`,
+  `.g`, and `.gc` files (up to 512 MB) and can seed queue jobs;
 - spool inventory, printer assignments, and low-stock visibility; and
 - a local activity log; and
-- read-only local telemetry connections for OctoPrint, Moonraker/Klipper, and
-  PrusaLink, with credentials stored in the operating system credential vault.
+- local telemetry connections for OctoPrint, Moonraker/Klipper, and PrusaLink,
+  with credentials stored in the operating system credential vault; and
+- explicit file upload plus confirmed start, pause, resume, and cancel controls
+  for connected OctoPrint and Moonraker/Klipper printers.
 
-The app does **not** yet control printers, transmit G-code, or expose cameras.
-Those actions are the next adapter phase and stay off by default so a mistaken
-setup cannot start or interrupt a print. Bambu LAN support is being added as a
-separate adapter because it uses a different local protocol.
+Before a print is started, the operator must select **Upload** and then confirm
+**Start**. Mirdain does not issue a physical printer command during connection
+setup or merely because a job was added to the queue.
+
+Not yet included: Bambu LAN controls, PrusaLink controls, cameras, remote
+access, compatibility-based routing, automatic filament measurement, and
+automation workflows. Those are separate capability layers that need
+printer-family-specific validation before they can safely be enabled.
 
 ## First-time setup (Windows)
 
@@ -37,11 +43,14 @@ npm.cmd install
 npm.cmd run local
 ```
 
-The command starts the API and dashboard together, opens
-`http://127.0.0.1:5174`, and stops both services when you press `Ctrl+C`.
+The command starts the API and dashboard together, opens an available local
+address (normally `http://127.0.0.1:5174`), and stops both services when you
+press `Ctrl+C`.
 
 ## Validation
 
 ```powershell
 npm.cmd run build
+npm.cmd run lint
+.\.venv\Scripts\python.exe -m unittest discover -s backend\tests -v
 ```

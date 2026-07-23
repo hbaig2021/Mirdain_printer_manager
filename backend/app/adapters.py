@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -37,8 +38,8 @@ class PrinterAdapter:
 
     This boundary keeps vendor-specific requests out of the dashboard and makes
     it possible to add new printer families without changing queue logic.
-    Commands are deliberately absent from this first connection slice: it only
-    verifies access and reads printer state.
+    It provides telemetry everywhere, and file/control methods only where a
+    local protocol implementation has been deliberately validated.
     """
 
     key: str
@@ -47,6 +48,13 @@ class PrinterAdapter:
 
     def snapshot(self, host: str, credential: dict[str, str]) -> AdapterSnapshot:
         raise NotImplementedError
+
+    def upload(self, host: str, credential: dict[str, str], source: Path, remote_name: str) -> str:
+        raise AdapterError(f"{self.label} file transfer is not available yet.")
+
+    def command(self, host: str, credential: dict[str, str], action: str, remote_path: str | None = None) -> None:
+        del host, credential, action, remote_path
+        raise AdapterError(f"{self.label} job control is not available yet.")
 
     @staticmethod
     def _url(host: str, path: str) -> str:
@@ -115,6 +123,31 @@ class OctoPrintAdapter(PrinterAdapter):
             seen_at=datetime.now(UTC),
         )
 
+    def upload(self, host: str, credential: dict[str, str], source: Path, remote_name: str) -> str:
+        response = _upload_multipart(
+            self._url(host, "/api/files/local"), self._api_key(credential), source, remote_name,
+        )
+        path = response.get("files", {}).get("local", {}).get("path") if isinstance(response.get("files"), dict) else None
+        if not isinstance(path, str) or not path:
+            raise AdapterError("OctoPrint accepted the upload but did not return the remote file path.")
+        return path
+
+    def command(self, host: str, credential: dict[str, str], action: str, remote_path: str | None = None) -> None:
+        headers = self._api_key(credential)
+        if action == "start":
+            if not remote_path:
+                raise AdapterError("Upload the job to OctoPrint before starting it.")
+            _post_json(self._url(host, f"/api/files/local/{_path_component(remote_path)}"), headers, {"command": "select", "print": False})
+            _post_json(self._url(host, "/api/job"), headers, {"command": "start"})
+            return
+        if action in {"pause", "resume"}:
+            _post_json(self._url(host, "/api/job"), headers, {"command": "pause", "action": action})
+            return
+        if action == "cancel":
+            _post_json(self._url(host, "/api/job"), headers, {"command": "cancel"})
+            return
+        raise AdapterError(f"{action} is not a supported OctoPrint job command.")
+
 
 class MoonrakerAdapter(PrinterAdapter):
     key = "moonraker"
@@ -152,11 +185,33 @@ class MoonrakerAdapter(PrinterAdapter):
             seen_at=datetime.now(UTC),
         )
 
+    def upload(self, host: str, credential: dict[str, str], source: Path, remote_name: str) -> str:
+        response = _upload_multipart(
+            self._url(host, "/server/files/upload"), self._api_key(credential), source, remote_name, {"root": "gcodes"},
+        )
+        item = response.get("item", {}) if isinstance(response.get("item"), dict) else {}
+        path = item.get("path")
+        if not isinstance(path, str) or not path:
+            raise AdapterError("Moonraker accepted the upload but did not return the remote file path.")
+        return path
+
+    def command(self, host: str, credential: dict[str, str], action: str, remote_path: str | None = None) -> None:
+        headers = self._api_key(credential)
+        if action == "start":
+            if not remote_path:
+                raise AdapterError("Upload the job to Moonraker before starting it.")
+            _post_json(self._url(host, "/printer/print/start"), headers, {"filename": remote_path})
+            return
+        if action in {"pause", "resume", "cancel"}:
+            _post_json(self._url(host, f"/printer/print/{action}"), headers, {})
+            return
+        raise AdapterError(f"{action} is not a supported Moonraker job command.")
+
 
 class PrusaLinkAdapter(PrinterAdapter):
     key = "prusalink"
     label = "PrusaLink"
-    capabilities = AdapterCapabilities(telemetry=True, file_transfer=True, job_control=True, camera=True)
+    capabilities = AdapterCapabilities(telemetry=True, file_transfer=False, job_control=False, camera=False)
 
     def snapshot(self, host: str, credential: dict[str, str]) -> AdapterSnapshot:
         payload = self._json(self._url(host, "/api/v1/status"), self._api_key(credential))
@@ -213,6 +268,67 @@ def _temperature(value: Any) -> int | None:
     if not isinstance(value, (int, float)):
         return None
     return round(float(value))
+
+
+def _path_component(value: str) -> str:
+    # Preserve folder separators but prohibit URL manipulation from a stored path.
+    from urllib.parse import quote
+
+    return quote(value.lstrip("/"), safe="/")
+
+
+def _upload_multipart(
+    url: str,
+    headers: dict[str, str],
+    source: Path,
+    remote_name: str,
+    fields: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    try:
+        import requests
+    except ImportError as exc:
+        raise AdapterError("The file-transfer component is unavailable. Reinstall Mirdain Print Hub and try again.") from exc
+    try:
+        with source.open("rb") as handle:
+            response = requests.post(
+                url,
+                headers=headers,
+                data=fields or {},
+                files={"file": (remote_name, handle, "application/octet-stream")},
+                timeout=(4, 120),
+            )
+        _raise_for_response(response)
+        payload = response.json()
+    except OSError as exc:
+        raise AdapterError("The local print file could not be read.") from exc
+    except Exception as exc:
+        if exc.__class__.__module__.startswith("requests"):
+            raise AdapterError("The printer could not accept the file upload.") from exc
+        raise
+    if not isinstance(payload, dict):
+        raise AdapterError("The printer returned an invalid upload response.")
+    return payload
+
+
+def _post_json(url: str, headers: dict[str, str], payload: dict[str, Any]) -> None:
+    try:
+        import requests
+    except ImportError as exc:
+        raise AdapterError("The job-control component is unavailable. Reinstall Mirdain Print Hub and try again.") from exc
+    try:
+        response = requests.post(url, headers={"Content-Type": "application/json", **headers}, json=payload, timeout=(4, 20))
+        _raise_for_response(response)
+    except Exception as exc:
+        if exc.__class__.__module__.startswith("requests"):
+            raise AdapterError("The printer rejected the requested job command.") from exc
+        raise
+
+
+def _raise_for_response(response: Any) -> None:
+    if response.status_code in {401, 403}:
+        raise AdapterError("The printer rejected the API key. Check it and try again.")
+    if response.status_code >= 400:
+        raise AdapterError(f"The printer returned HTTP {response.status_code}.")
 
 
 ADAPTERS: dict[str, PrinterAdapter] = {

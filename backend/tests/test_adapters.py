@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from backend.app.adapters import MoonrakerAdapter, OctoPrintAdapter, PrusaLinkAdapter
@@ -51,3 +52,44 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(snapshot.percent_complete, 76)
         self.assertEqual(snapshot.active_job, "enclosure.3mf")
         self.assertEqual(snapshot.nozzle_temp, 215)
+
+    def test_octoprint_upload_and_start_use_documented_local_endpoints(self) -> None:
+        adapter = OctoPrintAdapter()
+        with patch(
+            "backend.app.adapters._upload_multipart",
+            return_value={"files": {"local": {"path": "jobs/cube.gcode"}}},
+        ) as upload, patch("backend.app.adapters._post_json") as post:
+            path = adapter.upload("printer.local", {"api_key": "test"}, Path("cube.gcode"), "cube.gcode")
+            adapter.command("printer.local", {"api_key": "test"}, "start", path)
+
+        self.assertEqual(path, "jobs/cube.gcode")
+        upload.assert_called_once()
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(post.call_args_list[0].args[0], "http://printer.local/api/files/local/jobs/cube.gcode")
+        self.assertEqual(post.call_args_list[0].args[2], {"command": "select", "print": False})
+        self.assertEqual(post.call_args_list[1].args[0], "http://printer.local/api/job")
+        self.assertEqual(post.call_args_list[1].args[2], {"command": "start"})
+
+    def test_moonraker_upload_and_controls_use_local_endpoints(self) -> None:
+        adapter = MoonrakerAdapter()
+        with patch(
+            "backend.app.adapters._upload_multipart",
+            return_value={"item": {"path": "cube.gcode"}},
+        ) as upload, patch("backend.app.adapters._post_json") as post:
+            path = adapter.upload("printer.local", {}, Path("cube.gcode"), "cube.gcode")
+            adapter.command("printer.local", {}, "start", path)
+            adapter.command("printer.local", {}, "pause")
+            adapter.command("printer.local", {}, "resume")
+            adapter.command("printer.local", {}, "cancel")
+
+        self.assertEqual(path, "cube.gcode")
+        self.assertEqual(upload.call_args.args[4], {"root": "gcodes"})
+        self.assertEqual(
+            [call.args[0] for call in post.call_args_list],
+            [
+                "http://printer.local/printer/print/start",
+                "http://printer.local/printer/print/pause",
+                "http://printer.local/printer/print/resume",
+                "http://printer.local/printer/print/cancel",
+            ],
+        )

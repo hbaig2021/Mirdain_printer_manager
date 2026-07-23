@@ -3,8 +3,9 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from . import database
 from .adapters import AdapterError, get_adapter
@@ -12,6 +13,7 @@ from .models import (
     DashboardResponse,
     FileCreate,
     FileRecord,
+    JobControlRequest,
     JobCreate,
     JobRecord,
     JobUpdate,
@@ -137,6 +139,39 @@ def remove_file(file_id: str) -> None:
         raise missing("File")
 
 
+@app.post("/api/files/upload", response_model=FileRecord, status_code=status.HTTP_201_CREATED)
+async def upload_file(
+    file: UploadFile = File(...),
+    name: str = Form(...),
+    material: str = Form(""),
+    estimated_minutes: int | None = Form(None),
+    notes: str = Form(""),
+) -> FileRecord:
+    original_filename = file.filename or ""
+    suffix = original_filename.rsplit(".", 1)[-1].lower() if "." in original_filename else ""
+    if suffix not in {"gcode", "g", "gc", "3mf", "bgcode"}:
+        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="Upload a .gcode, .3mf, .bgcode, .g, or .gc print file.")
+    payload = FileCreate(
+        name=name.strip(), filename=original_filename, file_type=suffix,
+        material=material.strip(), estimated_minutes=estimated_minutes, notes=notes.strip(),
+    )
+    try:
+        return database.store_upload(payload, original_filename, file.file)
+    except ValueError as error:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(error)) from error
+    finally:
+        await file.close()
+
+
+@app.get("/api/files/{file_id}/download")
+def download_file(file_id: str) -> FileResponse:
+    stored = database.stored_file(file_id)
+    if not stored:
+        raise missing("Stored file")
+    record, path = stored
+    return FileResponse(path, filename=record.filename, media_type="application/octet-stream")
+
+
 @app.get("/api/adapters")
 def adapters() -> list[dict[str, object]]:
     return [
@@ -181,6 +216,71 @@ def connect_printer(printer_id: str, payload: PrinterConnectionRequest) -> Print
         capabilities=updated.capabilities,
         message="Local printer connection verified. Monitoring is now enabled.",
     )
+
+
+@app.post("/api/jobs/{job_id}/deliver", response_model=JobRecord)
+def deliver_job(job_id: str) -> JobRecord:
+    job = database.get_job(job_id)
+    if not job:
+        raise missing("Job")
+    if not job.target_printer_id:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Assign this job to a printer before uploading it.")
+    if not job.file_id:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Choose an uploaded file for this job before sending it.")
+    printer = database.get_printer(job.target_printer_id)
+    stored = database.stored_file(job.file_id)
+    if not printer:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The assigned printer is no longer available.")
+    if not stored:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The job file is only a catalog record. Upload the actual file first.")
+    record, path = stored
+    try:
+        adapter = get_adapter(printer.adapter_type)
+        if not adapter.capabilities.file_transfer:
+            raise AdapterError(f"{adapter.label} file transfer is not available in this release.")
+        remote_path = adapter.upload(printer.host, load_secret(database.credential_id_for_printer(printer.id)), path, record.filename)
+        updated = database.mark_job_delivered(job_id, remote_path)
+    except (AdapterError, SecretStoreError) as error:
+        database.mark_job_delivery_error(job_id, str(error))
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
+    if not updated:
+        raise missing("Job")
+    return updated
+
+
+@app.post("/api/jobs/{job_id}/control", response_model=JobRecord)
+def control_job(job_id: str, payload: JobControlRequest) -> JobRecord:
+    if payload.confirmation != payload.action.upper():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Confirm this action with {payload.action.upper()}.")
+    job = database.get_job(job_id)
+    if not job:
+        raise missing("Job")
+    if not job.target_printer_id:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This job has no assigned printer.")
+    printer = database.get_printer(job.target_printer_id)
+    if not printer:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The assigned printer is no longer available.")
+    if payload.action == "start" and (job.delivery_state != "uploaded" or not job.remote_file_path):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Upload this file to the printer before starting it.")
+    try:
+        adapter = get_adapter(printer.adapter_type)
+        if not adapter.capabilities.job_control:
+            raise AdapterError(f"{adapter.label} job control is not available in this release.")
+        adapter.command(
+            printer.host, load_secret(database.credential_id_for_printer(printer.id)), payload.action, job.remote_file_path,
+        )
+    except (AdapterError, SecretStoreError) as error:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
+    if payload.action == "start":
+        updated = database.update_job(job_id, JobUpdate(state="running"))
+    elif payload.action == "cancel":
+        updated = database.update_job(job_id, JobUpdate(state="cancelled"))
+    else:
+        updated = database.get_job(job_id)
+    database.log_job_control(job_id, payload.action)
+    if not updated:
+        raise missing("Job")
+    return updated
 
 
 @app.post("/api/printers/{printer_id}/refresh")

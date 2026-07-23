@@ -66,6 +66,7 @@ class JobCreate(BaseModel):
     target_printer_id: str | None = None
     material: str = Field(default="", max_length=80)
     estimated_minutes: int = Field(default=60, ge=1, le=100_000)
+    file_id: str | None = None
 
 
 class JobUpdate(BaseModel):
@@ -76,6 +77,7 @@ class JobUpdate(BaseModel):
     estimated_minutes: int | None = Field(default=None, ge=1, le=100_000)
     state: JobState | None = None
     queue_position: int | None = Field(default=None, ge=1, le=100_000)
+    file_id: str | None = None
 
 
 class JobRecord(JobCreate):
@@ -83,6 +85,9 @@ class JobRecord(JobCreate):
     state: JobState
     created_at: datetime
     queue_position: int | None = None
+    delivery_state: Literal["not_ready", "ready", "uploaded", "error"] = "not_ready"
+    remote_file_path: str | None = None
+    delivered_at: datetime | None = None
 
 
 class MaterialCreate(BaseModel):
@@ -123,6 +128,14 @@ class FileCreate(BaseModel):
 class FileRecord(FileCreate):
     id: str
     created_at: datetime
+    stored_filename: str | None = None
+    size_bytes: int | None = None
+    sha256: str | None = None
+
+
+class JobControlRequest(BaseModel):
+    action: Literal["start", "pause", "resume", "cancel"]
+    confirmation: Literal["START", "PAUSE", "RESUME", "CANCEL"]
 
 
 class PrinterConnectionRequest(BaseModel):
