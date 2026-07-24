@@ -1,0 +1,37 @@
+{
+  "name": "mirdain-print-hub",
+  "private": true,
+  "version": "0.4.0",
+  "description": "Local-first 3D printer fleet, queue, file, and material management.",
+  "author": "Hamza Baig",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hbaig2021/Mirdain_printer_manager.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hbaig2021/Mirdain_printer_manager/issues"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "oxlint",
+    "preview": "vite preview",
+    "server": "python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8765 --reload",
+    "local": "node scripts/start-local.mjs"
+  },
+  "dependencies": {
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.2",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "oxlint": "^1.71.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.1.1"
+  }
+}

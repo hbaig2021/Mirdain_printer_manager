@@ -1,0 +1,40 @@
+name: Feature request
+description: Propose an operator workflow, integration, or improvement
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Operator problem
+      description: What print-farm task is difficult today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the desired workflow without copying another product's interface or text.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Fleet
+        - Queue and routing
+        - Files
+        - Materials
+        - Printer adapter
+        - Cameras
+        - Deployment and security
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and compatibility
+      description: Note any physical-printer, credential, network, or model-specific considerations.

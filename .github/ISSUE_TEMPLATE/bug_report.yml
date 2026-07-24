@@ -1,0 +1,72 @@
+name: Bug report
+description: Report a reproducible problem in Mirdain Print Hub
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for the report. Remove printer addresses, API keys, customer data, and proprietary print files before posting.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v0.3.0 or a commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Installation
+      options:
+        - Windows local launcher
+        - Linux local launcher
+        - macOS local launcher
+        - Docker Compose
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: adapter
+    attributes:
+      label: Printer adapter
+      options:
+        - Not printer-specific
+        - Manual
+        - OctoPrint
+        - Moonraker / Klipper
+        - PrusaLink
+        - Bambu LAN (not enabled)
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Include the expected result and the actual result.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Open …
+        2. Select …
+        3. See …
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste text rather than screenshots when possible. Redact secrets and local addresses.
+      render: shell
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials, private data, and proprietary print files.
+          required: true
+        - label: I will report a security vulnerability privately instead of in this issue.
+          required: true
