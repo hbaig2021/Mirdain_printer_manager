@@ -11,7 +11,7 @@ license = "MIT"
 authors = [{ name = "Hamza Baig" }]
 requires-python = ">=3.11"
 dependencies = [
-  "cryptography>=48.0.1,<49",
+  "cryptography>=48.0.1,<51",
   "fastapi>=0.115,<1.0",
   "keyring>=25,<26",
   "python-multipart>=0.0.20,<1.0",
